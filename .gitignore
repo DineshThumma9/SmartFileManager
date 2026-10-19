@@ -1,0 +1,8 @@
+.env
+coverage/
+.DS_Store
+plan.md
+.smartfile/
+.venv/
+__pycache__/
+*.py[cod]
