@@ -1,0 +1,14 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "smartfileman": {
+      "type": "local",
+      "command": ["uv", "run", "--locked", "smartfile-mcp"],
+      "enabled": true,
+      "environment": {
+        "SMARTFILE_DATA_DIR": ".smartfile",
+        "SMARTFILE_ALLOWED_ROOTS": "."
+      }
+    }
+  }
+}

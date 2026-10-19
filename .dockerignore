@@ -1,0 +1,9 @@
+.git
+.gitignore
+.env
+.smartfile
+.venv
+__pycache__
+*.pyc
+plan.md
+tests
