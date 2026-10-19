@@ -66,14 +66,17 @@ the setup command above.
 
 ## Test
 
-The one project test command is:
+The project test commands are:
 
 ```bash
 make test
+make tests
 ```
 
-It runs offline and uses deterministic fake embeddings. It does not call
-Ollama, download models, or access a network service.
+Both commands run the same offline locked pytest command against the single
+`tests/` directory. The `make test` spelling is canonical; `make tests` is an
+alias. The suite uses deterministic fake embeddings and does not call Ollama,
+download models, or access a network service.
 
 ## Run the CLI
 
