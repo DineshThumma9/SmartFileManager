@@ -73,10 +73,11 @@ make tests
 ```
 
 It runs the offline locked pytest command against the single `tests/` directory
-in uv's isolated project environment, so a stale or permission-protected
-`.venv` cannot prevent the test suite from starting. The suite uses
-deterministic fake embeddings and does not call Ollama, download models, or
-access a network service.
+using uv's isolated execution mode. Keep the project `.venv` owned by the user
+running the command; if a container or root process created it, remove that
+ignored environment and recreate it from the normal user shell with `uv sync`.
+The suite uses deterministic fake embeddings and does not call Ollama, download
+models, or access a network service.
 
 ## Run the CLI
 
