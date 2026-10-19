@@ -31,7 +31,7 @@ def test_preview_apply_and_undo(tmp_path: Path) -> None:
 
     plan = make_preview(tmp_path, mode="fuzzy", settings=settings)
     operation = plan.operations[0]
-    assert operation.subject == "Physics"
+    assert operation.subject == "Force - Motion - Newton"
     assert operation.status == "ready"
     assert source.exists()
 
@@ -79,3 +79,14 @@ def test_symlink_is_ignored(tmp_path: Path) -> None:
     result = scan(tmp_path)
 
     assert [file.filename for file in result.files] == ["physics.txt"]
+
+
+def test_plan_id_changes_when_mode_changes(tmp_path: Path) -> None:
+    source = tmp_path / "notes.txt"
+    source.write_text("motion and force", encoding="utf-8")
+    settings = settings_for(tmp_path)
+
+    fuzzy = make_preview(tmp_path, mode="fuzzy", settings=settings)
+    semantic = make_preview(tmp_path, mode="semantic", provider_kind="fake", settings=settings)
+
+    assert fuzzy.plan_id != semantic.plan_id

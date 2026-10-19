@@ -2,6 +2,7 @@ import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Sequence
 
 from .paths import ensure_within, safe_destination
 from .scanner import content_hash
@@ -10,6 +11,23 @@ from .schemas import MoveRecord, Plan
 
 class OperationError(ValueError):
     pass
+
+
+def resolve_operation_ids(plan: Plan, selectors: Sequence[str] | None = None) -> set[str]:
+    """Resolve full IDs or unique displayed prefixes to ready operations."""
+
+    ready = {operation.operation_id: operation for operation in plan.operations if operation.status == "ready"}
+    if not selectors:
+        return set(ready)
+    selected: set[str] = set()
+    for selector in selectors:
+        matches = [operation_id for operation_id in ready if operation_id == selector or operation_id.startswith(selector)]
+        if not matches:
+            raise OperationError(f"Unknown or non-ready operation: {selector}")
+        if len(matches) > 1:
+            raise OperationError(f"Ambiguous operation prefix: {selector}")
+        selected.add(matches[0])
+    return selected
 
 
 def save_plan(plan: Plan, storage_dir: Path) -> Path:
@@ -44,6 +62,10 @@ def apply_plan(plan: Plan, storage_dir: Path, operation_ids: set[str], approved:
     if not approved:
         raise OperationError("Apply requires explicit approval.")
     root = Path(plan.root_path).resolve()
+    ready_ids = {operation.operation_id for operation in plan.operations if operation.status == "ready"}
+    invalid_ids = operation_ids - ready_ids
+    if invalid_ids:
+        raise OperationError(f"Unknown or non-ready operation(s): {', '.join(sorted(invalid_ids))}")
     results = []
 
     for operation in plan.operations:

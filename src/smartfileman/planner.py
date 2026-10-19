@@ -1,4 +1,5 @@
 import hashlib
+import math
 import re
 import uuid
 from collections import defaultdict
@@ -6,9 +7,7 @@ from pathlib import Path
 from typing import Sequence
 
 from sklearn.cluster import DBSCAN
-from sklearn.metrics.pairwise import cosine_similarity
 
-from .embeddings.base import EmbeddingProvider
 from .paths import safe_destination
 from .schemas import Plan, PlanOperation, ScanResult, ScannedFile
 
@@ -21,73 +20,91 @@ CATEGORY_BY_EXTENSION = {
     ".txt": "Documents", ".md": "Documents", ".markdown": "Documents", ".csv": "Documents",
 }
 
-SUBJECT_RULES = {
-    "Mathematics": {"math", "mathematics", "algebra", "calculus", "geometry", "statistics"},
-    "Physics": {"physics", "mechanics", "motion", "force", "thermodynamics", "quantum"},
-    "Biology": {"biology", "cell", "genetics", "anatomy", "ecology"},
-    "Chemistry": {"chemistry", "chemical", "organic", "molecule", "reaction"},
-    "Computer Science": {"computer", "coding", "programming", "software", "algorithm", "python", "javascript"},
-    "History": {"history", "historical", "war", "empire", "ancient", "revolution"},
-    "Business": {"business", "finance", "marketing", "sales", "accounting", "management"},
-    "Anime": {"anime", "manga", "otaku", "animation"},
-    "Cooking": {"cooking", "recipe", "kitchen", "food", "baking"},
-    "Motorcycles": {"bike", "bikes", "motorcycle", "motorcycles", "motorbike", "racing"},
+STOP_WORDS = {
+    "about", "after", "also", "and", "are", "been", "from", "for", "have",
+    "into", "more", "not", "that", "the", "their", "this", "through", "with",
+    "your", "document", "documents", "file", "files", "notes", "page", "slide",
 }
-
-
-def _tokens(value: str) -> set[str]:
-    return set(re.findall(r"[a-z0-9]+", value.lower()))
 
 
 def category_for(file: ScannedFile) -> str:
     return CATEGORY_BY_EXTENSION.get(file.extension, "Other")
 
 
+def _evidence_tokens(text: str) -> list[str]:
+    tokens = [token for token in re.findall(r"[a-z0-9]+", text.lower()) if len(token) > 2 and token not in STOP_WORDS]
+    counts: dict[str, int] = defaultdict(int)
+    for token in tokens:
+        counts[token] += 1
+    return [token for token, _ in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:3]]
+
+
+def _label_from_text(text: str, fallback: str = "Needs review") -> str:
+    evidence = _evidence_tokens(text)
+    return " - ".join(token.title() for token in evidence) if evidence else fallback
+
+
 def fuzzy_subject(file: ScannedFile) -> tuple[str, float, str]:
-    tokens = _tokens(f"{file.relative_path} {' '.join(unit.text for unit in file.units)}")
-    scores = [(subject, len(tokens & keywords), keywords) for subject, keywords in SUBJECT_RULES.items()]
-    subject, score, _ = max(scores, key=lambda item: item[1])
-    if score == 0:
-        return "Needs review", 0.2, "No known subject terms were found."
-    matched = sorted(tokens & SUBJECT_RULES[subject])
-    return subject, min(0.55 + score * 0.12, 0.95), f"Matched subject terms: {', '.join(matched)}"
+    """Suggest a label from file evidence without a fixed subject taxonomy."""
+
+    evidence = _evidence_tokens(f"{file.relative_path} {' '.join(unit.text for unit in file.units)}")
+    if not evidence:
+        return "Needs review", 0.2, "No useful topic terms were found in the file evidence."
+    confidence = min(0.45 + len(evidence) * 0.12, 0.8)
+    return " - ".join(token.title() for token in evidence), confidence, f"Evidence terms: {', '.join(evidence)}"
 
 
-def _semantic_labels(files: Sequence[ScannedFile], provider: EmbeddingProvider) -> dict[str, tuple[str, float, str]]:
-    texts = [f"{file.filename}\n" + "\n".join(unit.text for unit in file.units) for file in files]
-    vectors = provider.embed(texts)
-    if not vectors:
+def _normalize(vector: list[float]) -> list[float]:
+    length = math.sqrt(sum(value * value for value in vector)) or 1.0
+    return [value / length for value in vector]
+
+
+def _semantic_labels(files: Sequence[ScannedFile], file_vectors: dict[str, list[float]]) -> dict[str, tuple[str, float, str]]:
+    embedded_files = [file for file in files if file.file_id in file_vectors]
+    if not embedded_files:
         return {}
+    vectors = [file_vectors[file.file_id] for file in embedded_files]
     labels = DBSCAN(eps=0.28, min_samples=1, metric="cosine").fit_predict(vectors)
     groups: dict[int, list[ScannedFile]] = defaultdict(list)
-    for file, label in zip(files, labels, strict=True):
+    for file, label in zip(embedded_files, labels, strict=True):
         groups[int(label)].append(file)
 
     result = {}
     for label, group in groups.items():
-        group_text = " ".join(f"{file.relative_path} {' '.join(unit.text for unit in file.units)}" for file in group)
-        pseudo = group[0].model_copy(update={"relative_path": group_text})
-        subject, _, _ = fuzzy_subject(pseudo)
-        if subject == "Needs review":
-            subject = f"Cluster {label + 1:02d}"
-        centroid = vectors[labels.tolist().index(label)]
-        similarities = cosine_similarity([centroid], vectors)[0]
-        for index, file in enumerate(files):
-            if labels[index] == label:
-                score = float(max(0.2, min(0.99, similarities[index])))
-                result[file.file_id] = (subject, score, f"Semantic cluster {label + 1:02d} with {len(group)} file(s).")
+        group_text = " ".join(
+            f"{file.relative_path} {' '.join(unit.text for unit in file.units)}" for file in group
+        )
+        evidence = _evidence_tokens(group_text)
+        subject = _label_from_text(group_text, fallback=f"Cluster {label + 1:02d}")
+        group_indices = [index for index, current_label in enumerate(labels) if current_label == label]
+        group_vectors = [vectors[index] for index in group_indices]
+        centroid = _normalize(
+            [sum(vector[index] for vector in group_vectors) / len(group_vectors) for index in range(len(vectors[0]))]
+        )
+        similarities = [sum(a * b for a, b in zip(vector, centroid, strict=True)) for vector in group_vectors]
+        confidence = float(max(0.2, min(0.99, sum(similarities) / len(similarities))))
+        reason = f"Cluster evidence: {', '.join(evidence) if evidence else 'similar embeddings'}"
+        for file in group:
+            result[file.file_id] = (subject, confidence, reason)
     return result
 
 
-def build_plan(scan_result: ScanResult, mode: str = "fuzzy", provider: EmbeddingProvider | None = None) -> Plan:
+def build_plan(
+    scan_result: ScanResult,
+    mode: str = "fuzzy",
+    file_vectors: dict[str, list[float]] | None = None,
+) -> Plan:
     ready_files = scan_result.ready_files
-    semantic_labels = _semantic_labels(ready_files, provider) if mode == "semantic" and provider else {}
+    semantic_labels = _semantic_labels(ready_files, file_vectors or {}) if mode == "semantic" else {}
     operations = []
     root = Path(scan_result.root_path)
 
     for file in ready_files:
-        if mode == "semantic" and file.file_id in semantic_labels:
-            subject, confidence, reason = semantic_labels[file.file_id]
+        if mode == "semantic":
+            subject, confidence, reason = semantic_labels.get(
+                file.file_id,
+                ("Needs review", 0.2, "No current cached embedding is available for this file."),
+            )
         else:
             subject, confidence, reason = fuzzy_subject(file)
         category = category_for(file)
@@ -116,6 +133,9 @@ def build_plan(scan_result: ScanResult, mode: str = "fuzzy", provider: Embedding
             )
         )
 
-    plan_seed = "\n".join(f"{item.file_id}:{item.content_hash}" for item in operations)
+    plan_seed = "\n".join(
+        f"{mode}:{item.file_id}:{item.content_hash}:{item.destination_relative}:{item.status}"
+        for item in operations
+    )
     plan_id = f"plan-{hashlib.sha256(plan_seed.encode()).hexdigest()[:16]}"
     return Plan(plan_id=plan_id, root_path=str(root), mode=mode, operations=operations)

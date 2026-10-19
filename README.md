@@ -4,11 +4,12 @@ SmartFile Manager is a local-first Python CLI and MCP server that scans files,
 creates an explainable organization preview, and moves files only after
 approval.
 
-The current foundation supports fuzzy organization, lightweight PDF/DOCX/PPTX
-and text extraction, SQLite/SQLModel persistence, cached embedding interfaces,
-safe plans, apply/undo, and an MCP stdio server. Semantic indexing uses a
-local Ollama provider when Ollama is available; tests use a deterministic fake
-provider and do not require a model.
+The current foundation supports fuzzy and semantic organization, safe content
+chunking, lightweight PDF/DOCX/PPTX and text extraction, SQLite/SQLModel
+persistence, cached embeddings, grouped Rich previews, safe apply/undo, and an
+MCP stdio server. Semantic indexing uses a local Ollama provider when Ollama
+is available; tests use a deterministic fake provider and do not require a
+model.
 
 ## Setup
 
@@ -74,16 +75,39 @@ Scan without changing files:
 uv run --extra dev smartfile scan demo-files
 ```
 
-Create a fuzzy organization preview:
+Create a fuzzy organization preview. This only displays proposed moves:
 
 ```bash
 uv run --extra dev smartfile preview demo-files --mode fuzzy
 ```
 
-The preview prints a plan ID. Apply only approved operations:
+Create a semantic organization preview. Semantic mode extracts bounded chunks,
+reuses cached chunk embeddings, clusters file vectors, and displays inferred
+groups. It does not use a predefined subject list:
+
+```bash
+uv run --extra dev smartfile preview demo-files --mode semantic
+```
+
+The preview prints a grouped visual review and a plan ID. Apply only approved
+operations:
 
 ```bash
 uv run --extra dev smartfile apply demo-files <PLAN_ID> --yes
+```
+
+For the interactive human workflow, use `organize`. It previews, lets you
+select `all`, `none`, or operation IDs, shows the selected operations again,
+and asks for confirmation before moving anything:
+
+```bash
+uv run --extra dev smartfile organize demo-files --mode semantic
+```
+
+Use `--yes` only for an intentional non-interactive run:
+
+```bash
+uv run --extra dev smartfile organize demo-files --mode fuzzy --yes
 ```
 
 Undo a move using the move ID returned by `apply`:
@@ -97,6 +121,16 @@ Index content with Ollama and create a semantic preview:
 ```bash
 uv run --extra dev smartfile index demo-files --provider ollama
 uv run --extra dev smartfile preview demo-files --mode semantic --provider ollama
+```
+
+See all supported commands and flags:
+
+```bash
+uv run smartfile --help
+uv run smartfile preview --help
+uv run smartfile organize --help
+uv run smartfile apply --help
+uv run smartfile index --help
 ```
 
 The local application state is stored in `demo-files/.smartfile/` by default.
@@ -164,6 +198,10 @@ docker run --rm -it "$IMAGE" smartfile --help
 - Existing destinations are never overwritten automatically.
 - A plan verifies the source content hash again before applying a move.
 - Scanned PDFs, DOCX files, and PPTX files use lightweight readers first.
+- Semantic mode chunks extracted content before embedding and reuses unchanged
+  chunk vectors.
+- Semantic topics are inferred from vector clusters and evidence terms; no
+  fixed subject taxonomy is used.
 - OCR, Docling, and advanced media extraction are optional future additions.
 - No secrets belong in the repository. Use `.env.example` as the safe config
   template and keep `.env` ignored.

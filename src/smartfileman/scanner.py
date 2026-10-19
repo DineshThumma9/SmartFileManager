@@ -3,7 +3,7 @@ import uuid
 from pathlib import Path
 
 from .paths import reject_symlink, resolve_root
-from .readers import SUPPORTED_EXTENSIONS, extract_units, extension_for, mime_type_for
+from .readers import MAX_CHUNK_CHARS, SUPPORTED_EXTENSIONS, extract_units, extension_for, mime_type_for
 from .schemas import ScannedFile, ScanResult
 
 
@@ -20,7 +20,7 @@ def stable_file_id(root: Path, path: Path) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"smartfile:{root.resolve()}:{relative}"))
 
 
-def scan(root: str | Path) -> ScanResult:
+def scan(root: str | Path, max_chunk_chars: int = MAX_CHUNK_CHARS) -> ScanResult:
     resolved_root = resolve_root(root)
     files: list[ScannedFile] = []
 
@@ -33,7 +33,7 @@ def scan(root: str | Path) -> ScanResult:
         reject_symlink(path)
         relative = path.relative_to(resolved_root).as_posix()
         try:
-            units = extract_units(path)
+            units = extract_units(path, max_chunk_chars=max_chunk_chars)
             files.append(
                 ScannedFile(
                     file_id=stable_file_id(resolved_root, path),

@@ -1,4 +1,5 @@
-from typing import Sequence
+from collections.abc import Sequence
+from numbers import Real
 
 import ollama
 
@@ -15,14 +16,33 @@ class OllamaEmbeddingProvider:
         if not texts:
             return []
         try:
-            response = self.client.embed(model=self.model_name, input=list(texts))
-            vectors = response.get("embeddings") if isinstance(response, dict) else None
+            response = self.client.embed(
+                model=self.model_name,
+                input=list(texts),
+                truncate=False,
+            )
+            if isinstance(response, dict):
+                vectors = response.get("embeddings")
+            else:
+                vectors = getattr(response, "embeddings", None)
         except Exception as error:
             raise RuntimeError(f"Ollama embedding failed for {self.model_name}: {error}") from error
 
-        if not isinstance(vectors, list) or len(vectors) != len(texts):
-            raise RuntimeError("Ollama returned an unexpected embedding response.")
-        if vectors and not isinstance(vectors[0], list):
+        if vectors is None or not isinstance(vectors, Sequence) or len(vectors) != len(texts):
+            raise RuntimeError(
+                f"Ollama returned {len(vectors) if isinstance(vectors, Sequence) else 'no'} "
+                f"embeddings for {len(texts)} inputs."
+            )
+        vectors = list(vectors)
+        if vectors and any(
+            not isinstance(vector, (list, tuple))
+            or not vector
+            or any(not isinstance(value, Real) for value in vector)
+            for vector in vectors
+        ):
             raise RuntimeError("Ollama returned a malformed embedding vector.")
+        dimensions = {len(vector) for vector in vectors}
+        if len(dimensions) > 1:
+            raise RuntimeError("Ollama returned vectors with inconsistent dimensions.")
         self.dimension = len(vectors[0]) if vectors else self.dimension
-        return vectors
+        return [list(vector) for vector in vectors]
