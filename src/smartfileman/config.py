@@ -30,6 +30,10 @@ class Settings(BaseSettings):
         default="embeddinggemma-2:740m",
         validation_alias=AliasChoices("OLLAMA_MODEL", "ollama_model"),
     )
+    ollama_naming_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("OLLAMA_NAMING_MODEL", "ollama_naming_model"),
+    )
 
     def allowed_root_paths(self, cwd: Path | None = None) -> tuple[Path, ...]:
         base = (cwd or Path.cwd()).resolve()

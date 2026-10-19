@@ -76,11 +76,12 @@ def preview(
     ),
     provider: EmbeddingProvider = typer.Option(EmbeddingProvider.ollama, help=_provider_help()),
     embedding_model: str | None = typer.Option(None, "--embedding-model", help="Override the Ollama embedding model tag."),
+    naming_model: str | None = typer.Option(None, "--naming-model", help="Optional local Gemma/Ollama model used only to name inferred clusters."),
     output: Path | None = typer.Option(None, help="Also export the internal plan as JSON at this path."),
     details: bool = typer.Option(True, "--details/--no-details", help="Show evidence and conflict reasons in the visual preview."),
 ):
     """Create a visual organization preview without moving files."""
-    plan = make_preview(root, mode.value, provider.value, embedding_model=embedding_model)
+    plan = make_preview(root, mode.value, provider.value, embedding_model=embedding_model, naming_model=naming_model)
     if output:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(plan.model_dump_json(indent=2), encoding="utf-8")
@@ -106,10 +107,11 @@ def organize_command(
     mode: OrganizationMode = typer.Option(OrganizationMode.fuzzy, help="fuzzy uses names/paths; semantic uses chunk embeddings."),
     provider: EmbeddingProvider = typer.Option(EmbeddingProvider.ollama, help=_provider_help()),
     embedding_model: str | None = typer.Option(None, "--embedding-model", help="Override the Ollama embedding model tag."),
+    naming_model: str | None = typer.Option(None, "--naming-model", help="Optional local Gemma/Ollama model used only to name inferred clusters."),
     yes: bool = typer.Option(False, "--yes", help="Select all ready operations and skip interactive confirmation."),
 ):
     """Preview, select, confirm, and apply organization in one visual workflow."""
-    plan = make_preview(root, mode.value, provider.value, embedding_model=embedding_model)
+    plan = make_preview(root, mode.value, provider.value, embedding_model=embedding_model, naming_model=naming_model)
     render_plan(console, plan)
     try:
         selected = _select_operations(plan, None, yes)

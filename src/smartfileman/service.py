@@ -3,6 +3,7 @@ from pathlib import Path
 from .config import Settings, get_settings
 from .embeddings import FakeEmbeddingProvider, OllamaEmbeddingProvider
 from .indexer import index_scan, load_cached_file_vectors
+from .naming import DeterministicClusterNamer, OllamaClusterNamer
 from .operations import apply_plan, load_move, load_plan, save_plan, undo_move
 from .paths import UnsafePathError, resolve_root
 from .planner import build_plan
@@ -26,23 +27,32 @@ def provider_for(kind: str, settings: Settings | None = None, model_name: str | 
     raise ValueError(f"Unknown embedding provider: {kind}")
 
 
+def namer_for(kind: str, settings: Settings | None = None, model_name: str | None = None):
+    settings = settings or get_settings()
+    if kind == "ollama":
+        return OllamaClusterNamer(settings.ollama_host, model_name or settings.ollama_naming_model or None)
+    return DeterministicClusterNamer()
+
+
 def make_preview(
     root: str | Path,
     mode: str = "fuzzy",
     provider_kind: str = "ollama",
     settings: Settings | None = None,
     embedding_model: str | None = None,
+    naming_model: str | None = None,
 ):
     settings = settings or get_settings()
     resolved_root = ensure_allowed_root(root, settings)
     scan_result = scan(resolved_root)
     provider = provider_for(provider_kind, settings, embedding_model) if mode == "semantic" else None
     file_vectors = None
+    namer = namer_for(provider_kind, settings, naming_model) if mode == "semantic" else None
     if provider is not None:
         database_path = settings.storage_dir(resolved_root) / "index.sqlite3"
         index_scan(scan_result, database_path, provider)
         file_vectors = load_cached_file_vectors(scan_result, database_path, provider)
-    plan = build_plan(scan_result, mode=mode, file_vectors=file_vectors)
+    plan = build_plan(scan_result, mode=mode, file_vectors=file_vectors, namer=namer)
     save_plan(plan, settings.storage_dir(resolved_root))
     return plan
 

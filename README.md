@@ -32,6 +32,22 @@ For semantic indexing, install Ollama separately and pull the configured model:
 ollama pull embeddinggemma-2:740m
 ```
 
+Semantic clustering can optionally ask an installed Gemma generation model to
+name each already-formed cluster. Set the exact model tag from `ollama list`,
+or pass it per command:
+
+```bash
+uv run smartfile preview demo-files \
+  --mode semantic \
+  --provider ollama \
+  --naming-model gemma3:4b
+```
+
+If `--naming-model` is omitted, SmartFile Manager tries to discover a locally
+installed non-embedding Gemma model. If naming is unavailable, it uses a
+deterministic evidence-term fallback. The naming model never decides cluster
+membership or moves files.
+
 Fuzzy mode and the test suite do not require Ollama.
 
 ### Editor interpreter

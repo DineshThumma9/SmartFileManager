@@ -6,8 +6,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Sequence
 
-from sklearn.cluster import DBSCAN
-
+from .naming import ClusterNamer, DeterministicClusterNamer, representative_evidence
 from .paths import safe_destination
 from .schemas import Plan, PlanOperation, ScanResult, ScannedFile
 
@@ -25,6 +24,8 @@ STOP_WORDS = {
     "into", "more", "not", "that", "the", "their", "this", "through", "with",
     "your", "document", "documents", "file", "files", "notes", "page", "slide",
 }
+SEMANTIC_DISTANCE_THRESHOLD = 0.18
+SEMANTIC_REVIEW_THRESHOLD = 0.64
 
 
 def category_for(file: ScannedFile) -> str:
@@ -59,33 +60,87 @@ def _normalize(vector: list[float]) -> list[float]:
     return [value / length for value in vector]
 
 
-def _semantic_labels(files: Sequence[ScannedFile], file_vectors: dict[str, list[float]]) -> dict[str, tuple[str, float, str]]:
+def _cosine_distance(left: list[float], right: list[float]) -> float:
+    return 1.0 - sum(a * b for a, b in zip(left, right, strict=True))
+
+
+def _complete_linkage_clusters(vectors: list[list[float]], threshold: float) -> list[list[int]]:
+    """Cluster without DBSCAN chaining unrelated files through bridge points."""
+
+    clusters = [[index] for index in range(len(vectors))]
+    while len(clusters) > 1:
+        best: tuple[float, int, int] | None = None
+        for left_index, left_cluster in enumerate(clusters):
+            for right_index in range(left_index + 1, len(clusters)):
+                right_cluster = clusters[right_index]
+                distance = max(
+                    _cosine_distance(vectors[left], vectors[right])
+                    for left in left_cluster
+                    for right in right_cluster
+                )
+                candidate = (distance, left_index, right_index)
+                if best is None or candidate < best:
+                    best = candidate
+        if best is None or best[0] > threshold:
+            break
+        _, left_index, right_index = best
+        clusters[left_index].extend(clusters[right_index])
+        del clusters[right_index]
+    return clusters
+
+
+def _cluster_terms(files: Sequence[ScannedFile], all_files: Sequence[ScannedFile]) -> list[str]:
+    cluster_counts: dict[str, int] = defaultdict(int)
+    corpus_counts: dict[str, int] = defaultdict(int)
+    for file in files:
+        tokens = set(_evidence_tokens(f"{file.relative_path} {' '.join(unit.text for unit in file.units)}"))
+        for token in tokens:
+            cluster_counts[token] += 1
+    for file in all_files:
+        tokens = set(_evidence_tokens(f"{file.relative_path} {' '.join(unit.text for unit in file.units)}"))
+        for token in tokens:
+            corpus_counts[token] += 1
+    document_count = max(1, len(all_files))
+    ranked = sorted(
+        cluster_counts,
+        key=lambda token: (
+            -(cluster_counts[token] / len(files)) * math.log((document_count + 1) / (corpus_counts[token] + 1)),
+            token,
+        ),
+    )
+    return ranked[:4]
+
+
+def _semantic_labels(
+    files: Sequence[ScannedFile],
+    file_vectors: dict[str, list[float]],
+    namer: ClusterNamer | None = None,
+) -> dict[str, tuple[str, float, str]]:
     embedded_files = [file for file in files if file.file_id in file_vectors]
     if not embedded_files:
         return {}
     vectors = [file_vectors[file.file_id] for file in embedded_files]
-    labels = DBSCAN(eps=0.28, min_samples=1, metric="cosine").fit_predict(vectors)
-    groups: dict[int, list[ScannedFile]] = defaultdict(list)
-    for file, label in zip(embedded_files, labels, strict=True):
-        groups[int(label)].append(file)
+    groups = {
+        label: [embedded_files[index] for index in indices]
+        for label, indices in enumerate(_complete_linkage_clusters(vectors, SEMANTIC_DISTANCE_THRESHOLD))
+    }
 
     result = {}
     for label, group in groups.items():
-        group_text = " ".join(
-            f"{file.relative_path} {' '.join(unit.text for unit in file.units)}" for file in group
-        )
-        evidence = _evidence_tokens(group_text)
-        subject = _label_from_text(group_text, fallback=f"Cluster {label + 1:02d}")
-        group_indices = [index for index, current_label in enumerate(labels) if current_label == label]
+        evidence = _cluster_terms(group, embedded_files)
+        fallback = _label_from_text(" ".join(evidence), fallback=f"Cluster {label + 1:02d}")
+        evidence_text = representative_evidence(group, evidence)
+        subject = (namer or DeterministicClusterNamer()).name(evidence_text, fallback)
+        group_indices = [embedded_files.index(file) for file in group]
         group_vectors = [vectors[index] for index in group_indices]
         centroid = _normalize(
             [sum(vector[index] for vector in group_vectors) / len(group_vectors) for index in range(len(vectors[0]))]
         )
         similarities = [sum(a * b for a, b in zip(vector, centroid, strict=True)) for vector in group_vectors]
-        confidence = float(max(0.2, min(0.99, sum(similarities) / len(similarities))))
-        reason = f"Cluster evidence: {', '.join(evidence) if evidence else 'similar embeddings'}"
-        for file in group:
-            result[file.file_id] = (subject, confidence, reason)
+        for file, confidence in zip(group, similarities, strict=True):
+            bounded_confidence = float(max(0.2, min(0.99, confidence)))
+            reason = f"Cluster evidence: {', '.join(evidence) if evidence else 'similar embeddings'}"
+            result[file.file_id] = (subject, bounded_confidence, reason)
     return result
 
 
@@ -93,9 +148,10 @@ def build_plan(
     scan_result: ScanResult,
     mode: str = "fuzzy",
     file_vectors: dict[str, list[float]] | None = None,
+    namer: ClusterNamer | None = None,
 ) -> Plan:
     ready_files = scan_result.ready_files
-    semantic_labels = _semantic_labels(ready_files, file_vectors or {}) if mode == "semantic" else {}
+    semantic_labels = _semantic_labels(ready_files, file_vectors or {}, namer) if mode == "semantic" else {}
     operations = []
     root = Path(scan_result.root_path)
 
@@ -115,7 +171,7 @@ def build_plan(
         if destination.exists() and destination.resolve() != source.resolve():
             status = "conflict"
             reason = f"Destination already exists: {destination_relative}"
-        elif subject == "Needs review":
+        elif subject == "Needs review" or (mode == "semantic" and confidence < SEMANTIC_REVIEW_THRESHOLD):
             status = "needs-review"
         operation_id = str(uuid.uuid4())
         operations.append(

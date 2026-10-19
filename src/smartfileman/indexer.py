@@ -13,7 +13,7 @@ from .embeddings.base import EmbeddingProvider
 from .models import ContentUnitRecord, EmbeddingRecord, FileRecord
 from .schemas import ContentUnit, ScanResult, ScannedFile
 
-EMBEDDING_CACHE_VERSION = "cache-v2"
+EMBEDDING_CACHE_VERSION = "cache-v3-content-first"
 EMBEDDING_BATCH_SIZE = 16
 
 
@@ -35,7 +35,9 @@ def _unit_id(file_id: str, unit: ContentUnit) -> str:
 
 
 def _embedding_payload(file: ScannedFile, unit: ContentUnit) -> str:
-    return f"{EMBEDDING_CACHE_VERSION}\n{file.filename}\n{unit.text}"
+    chunk_index = unit.locator.get("chunk_index", 0)
+    context = f"Filename: {file.filename}\nPath: {file.relative_path}\n" if chunk_index == 0 else ""
+    return f"{EMBEDDING_CACHE_VERSION}\n{context}{unit.text}"
 
 
 def _embedding_input_hash(payload: str) -> str:
