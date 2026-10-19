@@ -76,7 +76,8 @@ It runs the offline locked pytest command against the single `tests/` directory
 using uv's isolated execution mode. Keep the project `.venv` owned by the user
 running the command; if a container or root process created it, remove that
 ignored environment and recreate it from the normal user shell with `uv sync`.
-The suite uses deterministic fake embeddings and does not call Ollama, download
+The command prints each test name and an explicit passed/failed summary. The
+suite uses deterministic fake embeddings and does not call Ollama, download
 models, or access a network service.
 
 ## Run the CLI
