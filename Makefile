@@ -1,6 +1,4 @@
-.PHONY: test tests
+.PHONY: tests
 
-test:
-	uv run --extra dev --offline --locked pytest -q
-
-tests: test
+tests:
+	uv run --isolated --extra dev --offline --locked pytest -q

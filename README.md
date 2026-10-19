@@ -66,17 +66,17 @@ the setup command above.
 
 ## Test
 
-The project test commands are:
+The project test command is:
 
 ```bash
-make test
 make tests
 ```
 
-Both commands run the same offline locked pytest command against the single
-`tests/` directory. The `make test` spelling is canonical; `make tests` is an
-alias. The suite uses deterministic fake embeddings and does not call Ollama,
-download models, or access a network service.
+It runs the offline locked pytest command against the single `tests/` directory
+in uv's isolated project environment, so a stale or permission-protected
+`.venv` cannot prevent the test suite from starting. The suite uses
+deterministic fake embeddings and does not call Ollama, download models, or
+access a network service.
 
 ## Run the CLI
 
