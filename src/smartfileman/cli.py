@@ -4,6 +4,7 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.progress import BarColumn, Progress, TaskProgressColumn, TextColumn, TimeRemainingColumn
 from rich.table import Table
 
 from .config import get_settings
@@ -37,6 +38,22 @@ app = typer.Typer(
 console = Console()
 
 
+def _with_progress(callback):
+    with Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TimeRemainingColumn(),
+        console=console,
+    ) as progress:
+        task_id = progress.add_task("Starting", total=100)
+
+        def report(stage: str, percentage: float) -> None:
+            progress.update(task_id, description=stage, completed=max(0.0, min(100.0, percentage)))
+
+        return callback(report)
+
+
 def _root_argument() -> typer.Argument:
     return typer.Argument(..., exists=True, file_okay=False, help="Directory to scan or organize.")
 
@@ -63,7 +80,14 @@ def index_command(
     embedding_model: str | None = typer.Option(None, "--embedding-model", help="Override the Ollama embedding model tag."),
 ):
     """Extract chunks and cache embeddings for later semantic previews."""
-    result = index(root, provider.value, embedding_model=embedding_model)
+    result = _with_progress(
+        lambda report: index(
+            root,
+            provider.value,
+            embedding_model=embedding_model,
+            progress_callback=report,
+        )
+    )
     console.print_json(json.dumps(result))
 
 
@@ -81,7 +105,16 @@ def preview(
     details: bool = typer.Option(True, "--details/--no-details", help="Show evidence and conflict reasons in the visual preview."),
 ):
     """Create a visual organization preview without moving files."""
-    plan = make_preview(root, mode.value, provider.value, embedding_model=embedding_model, naming_model=naming_model)
+    plan = _with_progress(
+        lambda report: make_preview(
+            root,
+            mode.value,
+            provider.value,
+            embedding_model=embedding_model,
+            naming_model=naming_model,
+            progress_callback=report,
+        )
+    )
     if output:
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_text(plan.model_dump_json(indent=2), encoding="utf-8")
@@ -89,10 +122,10 @@ def preview(
 
 
 def _select_operations(plan, selectors: list[str] | None, yes: bool) -> set[str]:
-    if yes:
-        return resolve_operation_ids(plan)
     if selectors:
         return resolve_operation_ids(plan, selectors)
+    if yes:
+        return resolve_operation_ids(plan)
     answer = typer.prompt("Select operations: all, none, or comma-separated IDs", default="all").strip()
     if answer.lower() == "none":
         return set()
@@ -111,7 +144,16 @@ def organize_command(
     yes: bool = typer.Option(False, "--yes", help="Select all ready operations and skip interactive confirmation."),
 ):
     """Preview, select, confirm, and apply organization in one visual workflow."""
-    plan = make_preview(root, mode.value, provider.value, embedding_model=embedding_model, naming_model=naming_model)
+    plan = _with_progress(
+        lambda report: make_preview(
+            root,
+            mode.value,
+            provider.value,
+            embedding_model=embedding_model,
+            naming_model=naming_model,
+            progress_callback=report,
+        )
+    )
     render_plan(console, plan)
     try:
         selected = _select_operations(plan, None, yes)

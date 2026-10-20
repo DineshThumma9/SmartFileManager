@@ -4,6 +4,7 @@ import pytest
 
 from smartfileman.config import Settings
 from smartfileman.operations import OperationError
+from smartfileman.paths import UnsafePathError, safe_destination
 from smartfileman.readers import READERS
 from smartfileman.scanner import content_hash, scan
 from smartfileman.service import apply, make_preview, undo
@@ -79,6 +80,16 @@ def test_symlink_is_ignored(tmp_path: Path) -> None:
     result = scan(tmp_path)
 
     assert [file.filename for file in result.files] == ["physics.txt"]
+
+
+def test_destination_rejects_symlinked_parent(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(UnsafePathError, match="symlink"):
+        safe_destination(tmp_path, "link/file.txt")
 
 
 def test_plan_id_changes_when_mode_changes(tmp_path: Path) -> None:

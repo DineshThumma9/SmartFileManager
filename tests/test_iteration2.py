@@ -53,7 +53,7 @@ def test_visual_preview_groups_operations() -> None:
                 category="Documents",
                 subject="Force - Motion",
                 confidence=0.9,
-                reason="Cluster evidence: force motion",
+                reason="Cluster similarity evidence: force, motion; peer-supported cluster",
             )
         ],
     )
@@ -66,6 +66,8 @@ def test_visual_preview_groups_operations() -> None:
     assert "Force - Motion" in output
     assert "lecture.pdf" in output
     assert "90%" in output
+    assert "Evidence: force motion" in output
+    assert "cluster" not in output.lower().split("evidence:", 1)[1].split("\n", 1)[0]
 
 
 def test_semantic_clusters_do_not_chain_unrelated_files() -> None:

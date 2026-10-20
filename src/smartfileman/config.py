@@ -34,6 +34,11 @@ class Settings(BaseSettings):
         default="",
         validation_alias=AliasChoices("OLLAMA_NAMING_MODEL", "ollama_naming_model"),
     )
+    ollama_naming_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        validation_alias=AliasChoices("OLLAMA_NAMING_TIMEOUT_SECONDS", "ollama_naming_timeout_seconds"),
+    )
 
     def allowed_root_paths(self, cwd: Path | None = None) -> tuple[Path, ...]:
         base = (cwd or Path.cwd()).resolve()

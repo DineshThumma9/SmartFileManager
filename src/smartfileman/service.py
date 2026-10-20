@@ -1,4 +1,5 @@
 from pathlib import Path
+from collections.abc import Callable
 
 from .config import Settings, get_settings
 from .embeddings import FakeEmbeddingProvider, OllamaEmbeddingProvider
@@ -8,6 +9,22 @@ from .operations import apply_plan, load_move, load_plan, save_plan, undo_move
 from .paths import UnsafePathError, resolve_root
 from .planner import build_plan
 from .scanner import scan
+
+ProgressCallback = Callable[[str, float], None]
+
+
+def _mapped_progress(
+    callback: ProgressCallback | None,
+    start: float,
+    end: float,
+) -> ProgressCallback | None:
+    if callback is None:
+        return None
+
+    def report(stage: str, fraction: float) -> None:
+        callback(stage, start + (end - start) * max(0.0, min(1.0, fraction)))
+
+    return report
 
 
 def ensure_allowed_root(root: str | Path, settings: Settings | None = None) -> Path:
@@ -27,10 +44,20 @@ def provider_for(kind: str, settings: Settings | None = None, model_name: str | 
     raise ValueError(f"Unknown embedding provider: {kind}")
 
 
-def namer_for(kind: str, settings: Settings | None = None, model_name: str | None = None):
+def namer_for(
+    kind: str,
+    settings: Settings | None = None,
+    model_name: str | None = None,
+    cache_path: Path | None = None,
+):
     settings = settings or get_settings()
     if kind == "ollama":
-        return OllamaClusterNamer(settings.ollama_host, model_name or settings.ollama_naming_model or None)
+        return OllamaClusterNamer(
+            settings.ollama_host,
+            model_name or settings.ollama_naming_model or None,
+            cache_path=cache_path,
+            timeout_seconds=settings.ollama_naming_timeout_seconds,
+        )
     return DeterministicClusterNamer()
 
 
@@ -41,19 +68,56 @@ def make_preview(
     settings: Settings | None = None,
     embedding_model: str | None = None,
     naming_model: str | None = None,
+    progress_callback: ProgressCallback | None = None,
 ):
     settings = settings or get_settings()
     resolved_root = ensure_allowed_root(root, settings)
-    scan_result = scan(resolved_root)
+    extraction_cache = settings.storage_dir(resolved_root) / "extraction-cache.json"
+    scan_result = scan(
+        resolved_root,
+        extraction_cache_path=extraction_cache,
+        excluded_paths=(settings.storage_dir(resolved_root),),
+        progress_callback=_mapped_progress(progress_callback, 0.0, 20.0 if mode == "semantic" else 60.0),
+    )
     provider = provider_for(provider_kind, settings, embedding_model) if mode == "semantic" else None
     file_vectors = None
-    namer = namer_for(provider_kind, settings, naming_model) if mode == "semantic" else None
+    namer = (
+        namer_for(
+            provider_kind,
+            settings,
+            naming_model,
+            cache_path=settings.storage_dir(resolved_root) / "naming-cache.json",
+        )
+        if mode == "semantic"
+        else None
+    )
     if provider is not None:
         database_path = settings.storage_dir(resolved_root) / "index.sqlite3"
-        index_scan(scan_result, database_path, provider)
-        file_vectors = load_cached_file_vectors(scan_result, database_path, provider)
-    plan = build_plan(scan_result, mode=mode, file_vectors=file_vectors, namer=namer)
+        index_scan(
+            scan_result,
+            database_path,
+            provider,
+            progress_callback=_mapped_progress(progress_callback, 20.0, 60.0),
+        )
+        file_vectors = load_cached_file_vectors(
+            scan_result,
+            database_path,
+            provider,
+            progress_callback=_mapped_progress(progress_callback, 60.0, 72.0),
+        )
+        plan_progress = _mapped_progress(progress_callback, 72.0, 96.0)
+    else:
+        plan_progress = _mapped_progress(progress_callback, 60.0, 96.0)
+    plan = build_plan(
+        scan_result,
+        mode=mode,
+        file_vectors=file_vectors,
+        namer=namer,
+        progress_callback=plan_progress,
+    )
     save_plan(plan, settings.storage_dir(resolved_root))
+    if progress_callback:
+        progress_callback("Preview ready", 100.0)
     return plan
 
 
@@ -62,11 +126,25 @@ def index(
     provider_kind: str = "ollama",
     settings: Settings | None = None,
     embedding_model: str | None = None,
+    progress_callback: ProgressCallback | None = None,
 ):
     settings = settings or get_settings()
     resolved_root = ensure_allowed_root(root, settings)
     provider = provider_for(provider_kind, settings, embedding_model)
-    result = index_scan(scan(resolved_root), settings.storage_dir(resolved_root) / "index.sqlite3", provider)
+    extraction_cache = settings.storage_dir(resolved_root) / "extraction-cache.json"
+    result = index_scan(
+        scan(
+            resolved_root,
+            extraction_cache_path=extraction_cache,
+            excluded_paths=(settings.storage_dir(resolved_root),),
+            progress_callback=_mapped_progress(progress_callback, 0.0, 30.0),
+        ),
+        settings.storage_dir(resolved_root) / "index.sqlite3",
+        provider,
+        progress_callback=_mapped_progress(progress_callback, 30.0, 100.0),
+    )
+    if progress_callback:
+        progress_callback("Index ready", 100.0)
     return {"root_path": str(resolved_root), **result}
 
 

@@ -6,6 +6,7 @@ from typing import Sequence
 class FakeEmbeddingProvider:
     provider_name = "fake"
     model_name = "fake-v1"
+    model_digest = "fake-v1"
     dimension = 16
 
     def __init__(self):

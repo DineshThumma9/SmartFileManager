@@ -4,7 +4,8 @@ from mcp.server.fastmcp import FastMCP
 
 from .config import get_settings
 from .operations import load_plan
-from .service import apply, index, make_preview, undo
+from .paths import UnsafePathError
+from .service import apply, ensure_allowed_root, index, make_preview, undo
 
 mcp = FastMCP("smartfileman")
 
@@ -19,7 +20,11 @@ def smartfile_preview(root: str, mode: str = "fuzzy", provider: str = "ollama") 
 def smartfile_get_plan(root: str, plan_id: str) -> dict:
     """Retrieve a saved plan by ID."""
     settings = get_settings()
-    return load_plan(plan_id, settings.storage_dir(Path(root).resolve())).model_dump(mode="json")
+    resolved_root = ensure_allowed_root(root, settings)
+    plan = load_plan(plan_id, settings.storage_dir(resolved_root))
+    if Path(plan.root_path).resolve() != resolved_root:
+        raise UnsafePathError("Plan root does not match the selected root.")
+    return plan.model_dump(mode="json")
 
 
 @mcp.tool()

@@ -13,6 +13,36 @@ class OperationError(ValueError):
     pass
 
 
+def _artifact_target(storage_dir: Path, directory: str, artifact_id: str) -> Path:
+    if (
+        not artifact_id
+        or artifact_id in {".", ".."}
+        or Path(artifact_id).name != artifact_id
+        or "/" in artifact_id
+        or "\\" in artifact_id
+    ):
+        raise OperationError(f"Invalid artifact ID: {artifact_id}")
+    if storage_dir.is_symlink():
+        raise OperationError("Application storage directory must not be a symlink.")
+    target_dir = storage_dir / directory
+    if target_dir.exists() and target_dir.is_symlink():
+        raise OperationError(f"Application {directory} directory must not be a symlink.")
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / f"{artifact_id}.json"
+    if target.is_symlink():
+        raise OperationError(f"Application artifact must not be a symlink: {target}")
+    return target
+
+
+def _atomic_write(target: Path, content: str) -> None:
+    temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(content, encoding="utf-8")
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def resolve_operation_ids(plan: Plan, selectors: Sequence[str] | None = None) -> set[str]:
     """Resolve full IDs or unique displayed prefixes to ready operations."""
 
@@ -31,31 +61,34 @@ def resolve_operation_ids(plan: Plan, selectors: Sequence[str] | None = None) ->
 
 
 def save_plan(plan: Plan, storage_dir: Path) -> Path:
-    plans_dir = storage_dir / "plans"
-    plans_dir.mkdir(parents=True, exist_ok=True)
-    target = plans_dir / f"{plan.plan_id}.json"
-    target.write_text(plan.model_dump_json(indent=2), encoding="utf-8")
+    target = _artifact_target(storage_dir, "plans", plan.plan_id)
+    _atomic_write(target, plan.model_dump_json(indent=2))
     return target
 
 
 def load_plan(plan_id: str, storage_dir: Path) -> Plan:
-    target = storage_dir / "plans" / f"{plan_id}.json"
+    target = _artifact_target(storage_dir, "plans", plan_id)
     if not target.is_file():
         raise OperationError(f"Plan not found: {plan_id}")
-    return Plan.model_validate_json(target.read_text(encoding="utf-8"))
+    plan = Plan.model_validate_json(target.read_text(encoding="utf-8"))
+    if plan.plan_id != plan_id:
+        raise OperationError(f"Plan ID does not match its artifact: {plan_id}")
+    return plan
 
 
 def _record_move(record: MoveRecord, storage_dir: Path) -> None:
-    moves_dir = storage_dir / "moves"
-    moves_dir.mkdir(parents=True, exist_ok=True)
-    (moves_dir / f"{record.move_id}.json").write_text(record.model_dump_json(indent=2), encoding="utf-8")
+    target = _artifact_target(storage_dir, "moves", record.move_id)
+    _atomic_write(target, record.model_dump_json(indent=2))
 
 
 def load_move(move_id: str, storage_dir: Path) -> MoveRecord:
-    target = storage_dir / "moves" / f"{move_id}.json"
+    target = _artifact_target(storage_dir, "moves", move_id)
     if not target.is_file():
         raise OperationError(f"Move not found: {move_id}")
-    return MoveRecord.model_validate_json(target.read_text(encoding="utf-8"))
+    move = MoveRecord.model_validate_json(target.read_text(encoding="utf-8"))
+    if move.move_id != move_id:
+        raise OperationError(f"Move ID does not match its artifact: {move_id}")
+    return move
 
 
 def apply_plan(plan: Plan, storage_dir: Path, operation_ids: set[str], approved: bool) -> list[dict[str, str]]:
@@ -102,7 +135,17 @@ def apply_plan(plan: Plan, storage_dir: Path, operation_ids: set[str], approved:
             destination_relative=operation.destination_relative,
             content_hash=operation.content_hash,
         )
-        _record_move(record, storage_dir)
+        try:
+            _record_move(record, storage_dir)
+        except Exception as error:
+            try:
+                os.link(destination, source)
+                destination.unlink()
+            except Exception as rollback_error:
+                raise OperationError(
+                    "Move record could not be saved and the move could not be rolled back."
+                ) from rollback_error
+            raise OperationError("Move record could not be saved; the move was rolled back.") from error
         results.append({"operation_id": operation.operation_id, "move_id": move_id, "status": "moved"})
 
     return results

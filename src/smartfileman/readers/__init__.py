@@ -11,6 +11,29 @@ from pptx import Presentation
 from ..schemas import ContentUnit
 
 MAX_CHUNK_CHARS = 1400
+MEDIA_EXTENSIONS = frozenset(
+    {
+        ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg",
+        ".mp4", ".mov", ".mkv", ".webm", ".avi", ".mp3", ".wav", ".m4a",
+    }
+)
+
+_MEDIA_TECHNICAL_TOKENS = re.compile(
+    r"(?ix)\b(?:"
+    r"ddp\d*(?:\.\d+)?|h\.?\d{3}|\d{3,4}(?:p|i)|\d{3,4}x\d{3,4}|"
+    r"\d+(?:\.\d+)?ch|\d+\.\d+|"
+    r"nf|amzn|web[- ]?dl|webrip|web|dl|bluray|blu[- ]?ray|brrip|bdrip|dvdrip|hdtv|"
+    r"x264|x265|h264|h265|h|264|265|hevc|avc|10bit|8bit|hdr10plus|hdr10|hdr|dv|"
+    r"ddp|dd|aac|ac3|dts|truehd|atmos|multi|dual[- ]?audio|esub|remux|repack|"
+    r"proper|extended|uncut|unrated|imax|rarbg|hdhub4u|4khdhub|qrips|smg|"
+    r"cinemagic|ds4k|bcore|hdhub|com"
+    r")\b"
+)
+_MEDIA_SERIES_MARKER = re.compile(r"(?ix)\b(?:s\d{1,2}e\d{1,3}|s\d{1,2})\b")
+_MEDIA_RELEASE_BOUNDARY = re.compile(
+    r"(?ix)\b(?:\d{3,4}(?:p|i)|web[- ]?dl|webrip|bluray|blu[- ]?ray|brrip|bdrip|dvdrip|hdtv|"
+    r"x264|x265|h264|h265|hevc|avc|10bit|8bit|hdr10plus|hdr10|hdr|imax|remux)\b"
+)
 
 def extension_for(path: Path) -> str:
     return path.suffix.lower()
@@ -18,6 +41,23 @@ def extension_for(path: Path) -> str:
 
 def mime_type_for(path: Path) -> str:
     return mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+
+
+def normalize_media_filename(path: Path) -> str:
+    """Keep likely title words while dropping common release metadata."""
+
+    value = path.stem.replace("_", " ")
+    value = _MEDIA_SERIES_MARKER.sub(" TV ", value)
+    boundary = _MEDIA_RELEASE_BOUNDARY.search(value)
+    if boundary:
+        title = value[: boundary.start()]
+        years = re.findall(r"\b(?:19|20)\d{2}\b", value[boundary.start() :])
+        value = f"{title} {' '.join(years)}"
+    value = _MEDIA_TECHNICAL_TOKENS.sub(" ", value)
+    value = re.sub(r"[\[\](){}]", " ", value)
+    value = value.replace(".", " ")
+    value = re.sub(r"\s+", " ", value).strip(" -")
+    return value or "Unknown media"
 
 
 def _unit(unit_type: str, ordinal: int, text: str, locator: dict[str, str | int] | None = None) -> ContentUnit:
@@ -99,23 +139,51 @@ def _read_pdf(path: Path) -> list[ContentUnit]:
 
 
 def _read_docx(path: Path) -> list[ContentUnit]:
-    return [
+    document = Document(str(path))
+    units = [
         _unit("paragraph", index, paragraph.text, {"paragraph": index + 1})
-        for index, paragraph in enumerate(Document(str(path)).paragraphs)
+        for index, paragraph in enumerate(document.paragraphs)
         if paragraph.text.strip()
     ]
+    for table_index, table in enumerate(document.tables):
+        rows = [
+            " | ".join(cell.text.strip() for cell in row.cells)
+            for row in table.rows
+        ]
+        text = "\n".join(row for row in rows if row.strip())
+        if text.strip():
+            units.append(_unit("table", len(units), text, {"table": table_index + 1}))
+    return units
+
+
+def _shape_text(shape: object) -> list[str]:
+    if getattr(shape, "has_table", False):
+        table = shape.table
+        rows = [
+            " | ".join(cell.text.strip() for cell in row.cells)
+            for row in table.rows
+        ]
+        return ["\n".join(row for row in rows if row.strip())]
+    nested = getattr(shape, "shapes", None)
+    if nested is not None:
+        values: list[str] = []
+        for child in nested:
+            values.extend(_shape_text(child))
+        return values
+    text = getattr(shape, "text", "")
+    return [text] if isinstance(text, str) and text.strip() else []
 
 
 def _read_pptx(path: Path) -> list[ContentUnit]:
     units = []
     for index, slide in enumerate(Presentation(str(path)).slides):
-        texts = [shape.text for shape in slide.shapes if hasattr(shape, "text") and shape.text.strip()]
+        texts = [text for shape in slide.shapes for text in _shape_text(shape) if text.strip()]
         units.append(_unit("slide", index, "\n".join(texts), {"slide": index + 1}))
     return units
 
 
 def _read_media(path: Path) -> list[ContentUnit]:
-    return [_unit("media", 0, path.stem, {"extension": extension_for(path)})]
+    return [_unit("media", 0, normalize_media_filename(path), {"extension": extension_for(path)})]
 
 
 Reader = Callable[[Path], list[ContentUnit]]
@@ -124,13 +192,7 @@ READERS: dict[str, Reader] = {
     ".pdf": _read_pdf,
     ".docx": _read_docx,
     ".pptx": _read_pptx,
-    **{
-        extension: _read_media
-        for extension in {
-            ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg",
-            ".mp4", ".mov", ".mkv", ".webm", ".avi", ".mp3", ".wav", ".m4a",
-        }
-    },
+    **{extension: _read_media for extension in MEDIA_EXTENSIONS},
 }
 
 SUPPORTED_EXTENSIONS = frozenset(READERS)

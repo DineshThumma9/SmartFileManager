@@ -1,3 +1,4 @@
+import re
 from collections import defaultdict
 
 from rich.console import Console, Group
@@ -26,20 +27,37 @@ def _operation_table(operations: list[PlanOperation]) -> Table:
     table.add_column("ID", width=10)
     table.add_column("Source", overflow="fold")
     table.add_column("Destination", overflow="fold")
-    table.add_column("Confidence", justify="right", width=12)
+    table.add_column("Peer similarity", justify="right", width=16)
     for operation in operations:
+        similarity = "—" if "no peer support" in operation.reason else f"{operation.confidence:.0%}"
         table.add_row(
             _status_text(operation),
             operation.operation_id[:8],
             operation.source_relative,
             operation.destination_relative,
-            f"{operation.confidence:.0%}",
+            similarity,
         )
     return table
 
 
+def _evidence_from_reason(reason: str) -> list[str]:
+    match = re.search(r"evidence:\s*([^;]+)", reason, flags=re.IGNORECASE)
+    if not match:
+        return []
+    return [
+        token
+        for token in re.findall(r"[a-z0-9][a-z0-9_-]*", match.group(1).lower())
+        if token not in {"similar", "embeddings", "content"}
+    ]
+
+
 def _group_panel(subject: str, category: str, operations: list[PlanOperation], details: bool) -> Panel:
-    evidence = sorted({word for operation in operations for word in operation.reason.split() if len(word) > 3})[:8]
+    evidence: list[str] = []
+    for operation in operations:
+        for token in _evidence_from_reason(operation.reason):
+            if token not in evidence:
+                evidence.append(token)
+    evidence = evidence[:8]
     summary = Text()
     summary.append(f"{subject} / {category}\n", style="bold")
     summary.append(f"{len(operations)} file(s) proposed\n", style="dim")

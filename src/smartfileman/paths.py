@@ -15,6 +15,19 @@ def resolve_root(root: str | Path) -> Path:
 
 def ensure_within(root: Path, candidate: Path, label: str = "path") -> Path:
     resolved_root = root.resolve()
+    lexical_candidate = candidate.absolute()
+    try:
+        relative_candidate = lexical_candidate.relative_to(resolved_root)
+    except ValueError:
+        relative_candidate = None
+    if relative_candidate is not None:
+        current = resolved_root
+        for part in relative_candidate.parts:
+            if part in {".", ".."}:
+                raise UnsafePathError(f"{label} contains traversal components: {candidate}")
+            current /= part
+            if current.is_symlink():
+                raise UnsafePathError(f"{label} contains an unsupported symlink: {candidate}")
     resolved_candidate = candidate.resolve()
     try:
         resolved_candidate.relative_to(resolved_root)
@@ -35,5 +48,4 @@ def reject_symlink(path: Path) -> None:
 def safe_destination(root: Path, destination_relative: str) -> Path:
     if os.path.isabs(destination_relative):
         raise UnsafePathError("Destination must be relative to the selected root")
-    destination = (root / destination_relative).resolve()
-    return ensure_within(root, destination, "destination")
+    return ensure_within(root, root / destination_relative, "destination")
