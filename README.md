@@ -46,6 +46,32 @@ uv run --locked smartfile organize demo-files --mode semantic --provider ollama
 The preview shows the proposed groups, evidence, and plan ID. Files are not
 moved until you approve the operations.
 
+## Common flags
+
+```text
+--mode fuzzy|semantic
+--provider ollama|fake
+--embedding-model MODEL
+--naming-model MODEL
+--yes                  approve organize without prompting
+```
+
+See all options with:
+
+```bash
+uv run --locked smartfile --help
+```
+
+## MCP
+
+Start the local MCP server:
+
+```bash
+uv run --locked smartfile-mcp
+```
+
+It exposes preview, indexing, apply, and undo tools to MCP-compatible clients.
+
 ## Test
 
 Run the offline test suite:
