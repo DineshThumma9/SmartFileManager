@@ -33,7 +33,11 @@ def test_unknown_model_identity_does_not_reuse_persistent_embeddings(tmp_path: P
 
     assert result["embedded"] == 1
     assert result["reused"] == 0
-    assert second.calls == 1
+    # The identity vector is embedded separately and is likewise not reused
+    # when the model identity cannot be established.
+    assert result["identity_embedded"] == 1
+    assert result["identity_reused"] == 0
+    assert second.calls == 2
 
 
 def test_custom_storage_directory_is_not_scanned(tmp_path: Path) -> None:

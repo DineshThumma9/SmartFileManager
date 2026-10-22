@@ -3,7 +3,7 @@ from collections.abc import Callable
 
 from .config import Settings, get_settings
 from .embeddings import FakeEmbeddingProvider, OllamaEmbeddingProvider
-from .indexer import index_scan, load_cached_file_vectors
+from .indexer import index_scan, load_cached_file_vectors, load_cached_identity_vectors
 from .naming import DeterministicClusterNamer, OllamaClusterNamer
 from .operations import apply_plan, load_move, load_plan, save_plan, undo_move
 from .paths import UnsafePathError, resolve_root
@@ -69,6 +69,7 @@ def make_preview(
     embedding_model: str | None = None,
     naming_model: str | None = None,
     progress_callback: ProgressCallback | None = None,
+    naming_provider: str | None = None,
 ):
     settings = settings or get_settings()
     resolved_root = ensure_allowed_root(root, settings)
@@ -81,9 +82,15 @@ def make_preview(
     )
     provider = provider_for(provider_kind, settings, embedding_model) if mode == "semantic" else None
     file_vectors = None
+    identity_vectors = None
+    # The naming provider is chosen independently of the embedding provider so
+    # that offline fake embeddings can be paired with a real naming model.
+    resolved_naming_provider = naming_provider
+    if resolved_naming_provider is None:
+        resolved_naming_provider = provider_kind if naming_model else "deterministic"
     namer = (
         namer_for(
-            provider_kind,
+            resolved_naming_provider,
             settings,
             naming_model,
             cache_path=settings.storage_dir(resolved_root) / "naming-cache.json",
@@ -105,6 +112,7 @@ def make_preview(
             provider,
             progress_callback=_mapped_progress(progress_callback, 60.0, 72.0),
         )
+        identity_vectors = load_cached_identity_vectors(scan_result, database_path, provider)
         plan_progress = _mapped_progress(progress_callback, 72.0, 96.0)
     else:
         plan_progress = _mapped_progress(progress_callback, 60.0, 96.0)
@@ -114,6 +122,7 @@ def make_preview(
         file_vectors=file_vectors,
         namer=namer,
         progress_callback=plan_progress,
+        identity_vectors=identity_vectors,
     )
     save_plan(plan, settings.storage_dir(resolved_root))
     if progress_callback:

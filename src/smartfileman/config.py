@@ -35,7 +35,7 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("OLLAMA_NAMING_MODEL", "ollama_naming_model"),
     )
     ollama_naming_timeout_seconds: float = Field(
-        default=30.0,
+        default=90.0,
         gt=0,
         validation_alias=AliasChoices("OLLAMA_NAMING_TIMEOUT_SECONDS", "ollama_naming_timeout_seconds"),
     )

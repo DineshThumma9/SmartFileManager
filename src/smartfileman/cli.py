@@ -24,6 +24,11 @@ class EmbeddingProvider(str, Enum):
     fake = "fake"
 
 
+class NamingProvider(str, Enum):
+    ollama = "ollama"
+    deterministic = "deterministic"
+
+
 app = typer.Typer(
     help=(
         "Local-first file organization with fuzzy and semantic modes.\n\n"
@@ -73,6 +78,13 @@ def _provider_help() -> str:
     return "Embedding provider. ollama uses the local model; fake is deterministic and offline-friendly."
 
 
+def _naming_provider_help() -> str:
+    return (
+        "Cluster naming provider. ollama asks a local model for a label; "
+        "deterministic derives the label from file evidence only."
+    )
+
+
 @app.command("index")
 def index_command(
     root: Path = _root_argument(),
@@ -101,6 +113,7 @@ def preview(
     provider: EmbeddingProvider = typer.Option(EmbeddingProvider.ollama, help=_provider_help()),
     embedding_model: str | None = typer.Option(None, "--embedding-model", help="Override the Ollama embedding model tag."),
     naming_model: str | None = typer.Option(None, "--naming-model", help="Optional local Gemma/Ollama model used only to name inferred clusters."),
+    naming_provider: NamingProvider | None = typer.Option(None, "--naming-provider", help=_naming_provider_help()),
     output: Path | None = typer.Option(None, help="Also export the internal plan as JSON at this path."),
     details: bool = typer.Option(True, "--details/--no-details", help="Show evidence and conflict reasons in the visual preview."),
 ):
@@ -112,6 +125,7 @@ def preview(
             provider.value,
             embedding_model=embedding_model,
             naming_model=naming_model,
+            naming_provider=naming_provider.value if naming_provider else None,
             progress_callback=report,
         )
     )
@@ -141,6 +155,7 @@ def organize_command(
     provider: EmbeddingProvider = typer.Option(EmbeddingProvider.ollama, help=_provider_help()),
     embedding_model: str | None = typer.Option(None, "--embedding-model", help="Override the Ollama embedding model tag."),
     naming_model: str | None = typer.Option(None, "--naming-model", help="Optional local Gemma/Ollama model used only to name inferred clusters."),
+    naming_provider: NamingProvider | None = typer.Option(None, "--naming-provider", help=_naming_provider_help()),
     yes: bool = typer.Option(False, "--yes", help="Select all ready operations and skip interactive confirmation."),
 ):
     """Preview, select, confirm, and apply organization in one visual workflow."""
@@ -151,6 +166,7 @@ def organize_command(
             provider.value,
             embedding_model=embedding_model,
             naming_model=naming_model,
+            naming_provider=naming_provider.value if naming_provider else None,
             progress_callback=report,
         )
     )

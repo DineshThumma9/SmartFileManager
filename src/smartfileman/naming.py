@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import re
 from collections.abc import Sequence
 from pathlib import Path
@@ -9,12 +10,34 @@ import ollama
 
 from .readers import MEDIA_EXTENSIONS, normalize_media_filename
 
+logger = logging.getLogger(__name__)
 
 _MAX_EVIDENCE_CHARS = 2_000
 _MAX_GENERATED_TOKENS = 32
 _DEFAULT_FALLBACK = "Needs review"
-_NAMING_CACHE_VERSION = "naming-v6-corrective-purpose-naming"
-_NAME_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_NAMING_CACHE_VERSION = "naming-v7-purpose-naming"
+_NAME_TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
+_FENCE_RE = re.compile(r"^```[a-zA-Z]*\s*|\s*```$")
+
+# The naming model is asked for the shared document type and purpose. Local
+# instruction-tuned models answer a "list the tools" prompt with a list of
+# tools, so the prompt states the distinction explicitly and shows that the
+# opening lines carry the document type.
+_NAMING_SYSTEM_PROMPT = (
+    "You label a group of related files so the label can be used as a folder name.\n"
+    "Decide what these files ARE: their document type and purpose. A good label is a "
+    "thing like a resume, a meeting note, a design document, a research paper, a tax "
+    "return, a music album, or a project plan.\n"
+    "The 'Shared topic/tool terms' line lists words that merely appear in the files. A "
+    "programming language, a framework, a database, or a company name is usually NOT the "
+    "right label, because many unrelated files share those words.\n"
+    "The 'Identity/opening evidence' lines show how the files actually begin. That is the "
+    "strongest signal for the document type, so use it first.\n"
+    "Rules: name the shared type and purpose rather than a list of tools. Ignore source "
+    "folder names, dates, years, URLs, usernames, and platform or release metadata. Do not "
+    "copy one file's unique filename. Use one to four words. Do not add a category word.\n"
+    'Answer with JSON only, exactly {"name": "your label"}.'
+)
 
 
 class ClusterNamer(Protocol):
@@ -50,9 +73,23 @@ def _tokens(value: str) -> set[str]:
 
 
 def _shared_evidence_tokens(evidence: str) -> set[str]:
+    """Tokens that several files in the cluster agree on.
+
+    These are the only tokens a label is allowed to reuse verbatim. A purpose
+    label such as "Resume" rarely appears in the shared topic terms, so the
+    pool also carries shared identity terms and shared filename terms.
+    """
+
     shared: set[str] = set()
     for line in evidence.splitlines():
-        if line.lower().startswith(("shared topic/tool terms:", "shared identity/title terms:")):
+        lowered = line.lower()
+        if lowered.startswith(
+            (
+                "shared topic/tool terms:",
+                "shared identity/title terms:",
+                "shared filename terms:",
+            )
+        ):
             shared.update(_tokens(line.split(":", 1)[1]))
     return shared
 
@@ -146,47 +183,30 @@ class OllamaClusterNamer:
 
     def _chat_name(self, model_name: str, evidence: str, fallback: str, correction: bool = False) -> str:
         correction_hint = (
-            " The previous answer was unsupported. Return a new label using at least one or two exact terms "
-            "from the shared evidence lines; do not use filenames, source folders, dates, URLs, usernames, "
-            "or release metadata."
+            " The previous answer was unsupported. Return a new label that names what these "
+            "files ARE (their document type and purpose), and reuse at least one or two exact "
+            "terms from the shared evidence lines. Do not use filenames, source folders, dates, "
+            "URLs, usernames, or release metadata."
             if correction
             else ""
         )
+        # Structured output is deliberately not requested. Ollama's JSON-schema
+        # constrained decoding is an order of magnitude slower than a plain
+        # completion, and the slower path regularly exceeded the request
+        # timeout, so every naming attempt failed and the deterministic
+        # fallback was used instead.
         response = self.client.chat(
             model=model_name,
             messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Name a file organization cluster. Return JSON only with a short 'name' value. "
-                        "Name the shared document purpose, subject, or identity—not the storage location. "
-                        "Use repeated evidence first. Ignore source directories, storage headings, dates, years, "
-                        "URLs, email addresses, usernames, platform names, and media release metadata. "
-                        "Do not copy a unique filename or one-file heading. Prefer a natural two-to-four-word "
-                        "purpose label over a list of tools. Do not invent details or add a category. "
-                        "The JSON object must use exactly this shape: {\"name\": \"short label\"}."
-                        + correction_hint
-                    ),
-                },
+                {"role": "system", "content": _NAMING_SYSTEM_PROMPT + correction_hint},
                 {"role": "user", "content": f"Evidence:\n{evidence}\nFallback: {fallback}"},
             ],
             think=False,
-            format={
-                "type": "object",
-                "properties": {"name": {"type": "string"}},
-                "required": ["name"],
-            },
             options={"temperature": 0, "num_predict": _MAX_GENERATED_TOKENS},
         )
         message = response.get("message") if isinstance(response, dict) else getattr(response, "message", None)
         content = message.get("content") if isinstance(message, dict) else getattr(message, "content", "")
-        parsed = json.loads(content)
-        if not isinstance(parsed, dict):
-            raise ValueError("Ollama naming response must be a JSON object")
-        name = parsed.get("name") or parsed.get("cluster")
-        if not isinstance(name, str) or not name.strip():
-            raise ValueError("Ollama naming response must contain a non-empty string name")
-        return name
+        return _parse_name(content)
 
     def name(self, evidence: str, fallback: str) -> str:
         safe_fallback = safe_cluster_name(fallback, _DEFAULT_FALLBACK)
@@ -198,28 +218,90 @@ class OllamaClusterNamer:
             if cached:
                 return safe_cluster_name(cached, safe_fallback)
             name = self._chat_name(model_name, compact_evidence, safe_fallback)
-            if not _name_is_supported(name, compact_evidence):
+            supported = _name_is_supported(name, compact_evidence)
+            if not supported:
                 name = self._chat_name(model_name, compact_evidence, safe_fallback, correction=True)
-            if not _name_is_supported(name, compact_evidence):
-                return safe_fallback
+                supported = _name_is_supported(name, compact_evidence)
             result = safe_cluster_name(name, safe_fallback)
-            self._cache[cache_key] = result
-            try:
-                self._save_cache()
-            except OSError:
-                pass
+            if supported:
+                self._cache[cache_key] = result
+                try:
+                    self._save_cache()
+                except OSError:
+                    logger.warning("Could not persist the naming cache at %s", self.cache_path, exc_info=True)
             return result
         except Exception:
+            # A failed naming call must stay visible. Silently returning the
+            # fallback made it impossible to tell a model failure apart from a
+            # model that had nothing to contribute.
+            logger.warning(
+                "Cluster naming failed; using the deterministic fallback instead.", exc_info=True
+            )
             return safe_fallback
+
+
+def _parse_name(content: object) -> str:
+    """Read a name out of a model response that need not be strict JSON.
+
+    The model is asked for JSON, but a local instruction-tuned model may wrap
+    it in a code fence or add a short preamble. Those are tolerated; a
+    response with no name in it is still an error, because silently treating
+    arbitrary prose as a label would put text like "not json" into a folder
+    name.
+    """
+
+    if not isinstance(content, str):
+        raise ValueError("Ollama naming response must contain text")
+    text = _FENCE_RE.sub("", content.strip()).strip()
+    if not text:
+        raise ValueError("Ollama naming response must contain text")
+    payload: object = None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{[^{}]*\}", text, flags=re.DOTALL)
+        if match:
+            try:
+                payload = json.loads(match.group(0))
+            except json.JSONDecodeError:
+                payload = None
+    if isinstance(payload, dict):
+        name = payload.get("name") or payload.get("cluster")
+        if isinstance(name, str) and name.strip():
+            return name
+        raise ValueError("Ollama naming response must contain a non-empty string name")
+    raise ValueError("Ollama naming response must contain a JSON object with a name")
+
+
+def shared_filename_terms(files: Sequence[object], minimum_support: int = 2) -> list[str]:
+    """Filename tokens that several files in a cluster agree on.
+
+    These are supporting identity evidence, not a license to copy one file's
+    unique name: a token must appear in at least ``minimum_support`` stems.
+    """
+
+    counts: dict[str, int] = {}
+    for file in files:
+        filename = str(getattr(file, "filename", ""))
+        stem = Path(filename).stem or filename
+        for token in _tokens(stem):
+            counts[token] = counts.get(token, 0) + 1
+    required = minimum_support if len(files) > 1 else 1
+    ranked = sorted(
+        (token for token, count in counts.items() if count >= required and len(token) > 2),
+        key=lambda token: (-counts[token], token),
+    )
+    return ranked[:4]
 
 
 def representative_evidence(
     files: Sequence[object],
     topic_terms: Sequence[str],
     identity_terms: Sequence[str] = (),
+    filename_terms: Sequence[str] = (),
 ) -> str:
     excerpts: list[str] = []
-    for file in files[:8]:
+    for file in files[:6]:
         relative_path = getattr(file, "relative_path", "")
         filename = Path(str(relative_path)).name or str(getattr(file, "filename", relative_path))
         extension = str(getattr(file, "extension", "")).lower()
@@ -244,5 +326,6 @@ def representative_evidence(
     return _compact_evidence(
         f"Shared topic/tool terms: {', '.join(topic_terms)}\n"
         f"Shared identity/title terms: {', '.join(identity_terms)}\n"
+        f"Shared filename terms: {', '.join(filename_terms)}\n"
         + "\n".join(excerpts)
     )

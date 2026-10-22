@@ -45,27 +45,3 @@ class EmbeddingRecord(SQLModel, table=True):
     vector_blob: bytes = Field(sa_column=Column(LargeBinary, nullable=False))
     input_hash: str = Field(index=True)
     created_at: datetime
-
-
-class ClusterRecord(SQLModel, table=True):
-    __tablename__ = "clusters"
-
-    cluster_id: str = Field(primary_key=True)
-    root_path: str = Field(index=True)
-    cluster_run_id: str
-    cluster_name: str
-    name_source: str = "deterministic"
-    confidence: float = 0.0
-    centroid_vector_blob: bytes | None = Field(default=None, sa_column=Column(LargeBinary))
-
-
-class ClusterMembershipRecord(SQLModel, table=True):
-    __tablename__ = "cluster_memberships"
-
-    membership_id: str = Field(primary_key=True)
-    file_id: str = Field(foreign_key="files.file_id", index=True)
-    cluster_id: str = Field(foreign_key="clusters.cluster_id", index=True)
-    score: float
-    rank: int
-    is_primary: bool = False
-    reason: str = ""

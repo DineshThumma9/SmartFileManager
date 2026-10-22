@@ -57,7 +57,11 @@ def test_ai_naming_bounds_generation_and_compacts_evidence() -> None:
 
     assert captured["options"] == {"temperature": 0, "num_predict": 32}
     assert captured["think"] is False
-    assert captured["format"]["required"] == ["name"]
+    # Structured output is deliberately not requested. Ollama's JSON-schema
+    # constrained decoding is roughly an order of magnitude slower than a
+    # plain completion, and the slower path regularly exceeded the request
+    # timeout, so every naming attempt fell back to the deterministic label.
+    assert "format" not in captured
     messages = captured["messages"]
     assert isinstance(messages, list)
     user_content = messages[1]["content"]

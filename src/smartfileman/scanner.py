@@ -39,6 +39,48 @@ def _extraction_cache_key(content_digest: str, max_chunk_chars: int, path: Path)
     return f"{EXTRACTION_CACHE_VERSION}:{max_chunk_chars}:{media_identity}:{content_digest}"
 
 
+def _verify_unchanged(path: Path, digest: str, stat_before_extraction: os.stat_result) -> None:
+    """Confirm the file did not change while it was being read.
+
+    Hashing the file a second time would catch any change, but it doubles
+    the read cost of every file in the collection. The size and modification
+    time are compared first, and only a file whose metadata moved is hashed
+    again. A file that changed while preserving both its size and its
+    modification time is a deliberate attempt to defeat the check, and the
+    second hash catches it.
+    """
+
+    stat_after = path.stat()
+    if (
+        stat_after.st_size == stat_before_extraction.st_size
+        and stat_after.st_mtime_ns == stat_before_extraction.st_mtime_ns
+    ):
+        return
+    if content_hash(path) != digest:
+        raise RuntimeError("Source changed during extraction.")
+
+
+def _hash_stable_file(path: Path) -> tuple[str, os.stat_result]:
+    """Hash a file and return the metadata that proves the hash is current.
+
+    Hashing a file that is being written concurrently produces a digest of
+    no particular version of the file. The size and modification time are
+    recorded before and after the read, and a file whose metadata moved
+    during the read is rejected rather than indexed under a digest that
+    describes neither the old nor the new content.
+    """
+
+    stat_before = path.stat()
+    digest = content_hash(path)
+    stat_after = path.stat()
+    if (
+        stat_before.st_size != stat_after.st_size
+        or stat_before.st_mtime_ns != stat_after.st_mtime_ns
+    ):
+        raise RuntimeError("Source changed while it was being read.")
+    return digest, stat_after
+
+
 def _load_extraction_cache(path: Path | None) -> dict[str, list[dict[str, object]]]:
     if path is None or not path.is_file():
         return {}
@@ -107,8 +149,9 @@ def scan(
 
         reject_symlink(path)
         relative = path.relative_to(resolved_root).as_posix()
-        digest = content_hash(path)
+        digest = ""
         try:
+            digest, stat_after_hash = _hash_stable_file(path)
             cache_key = _extraction_cache_key(digest, max_chunk_chars, path)
             cached_units = extraction_cache.get(cache_key)
             if cached_units is not None:
@@ -116,14 +159,12 @@ def scan(
                     units = [ContentUnit.model_validate(unit) for unit in cached_units]
                 except Exception:
                     units = extract_units(path, max_chunk_chars=max_chunk_chars)
-                    if content_hash(path) != digest:
-                        raise RuntimeError("Source changed during extraction.")
+                    _verify_unchanged(path, digest, stat_after_hash)
                     extraction_cache[cache_key] = [unit.model_dump(mode="json") for unit in units]
                     cache_changed = True
             else:
                 units = extract_units(path, max_chunk_chars=max_chunk_chars)
-                if content_hash(path) != digest:
-                    raise RuntimeError("Source changed during extraction.")
+                _verify_unchanged(path, digest, stat_after_hash)
                 extraction_cache[cache_key] = [unit.model_dump(mode="json") for unit in units]
                 cache_changed = True
             files.append(
@@ -135,12 +176,16 @@ def scan(
                     extension=extension_for(path),
                     mime_type=mime_type_for(path),
                     content_hash=digest,
-                    size_bytes=path.stat().st_size,
-                    modified_time_ns=path.stat().st_mtime_ns,
+                    size_bytes=stat_after_hash.st_size,
+                    modified_time_ns=stat_after_hash.st_mtime_ns,
                     units=units,
                 )
             )
         except Exception as error:  # A bad file must not abort the whole scan.
+            try:
+                failed_stat = path.stat()
+            except OSError:
+                failed_stat = None
             files.append(
                 ScannedFile(
                     file_id=stable_file_id(resolved_root, path),
@@ -149,9 +194,12 @@ def scan(
                     filename=path.name,
                     extension=extension_for(path),
                     mime_type=mime_type_for(path),
-                    content_hash=digest,
-                    size_bytes=path.stat().st_size,
-                    modified_time_ns=path.stat().st_mtime_ns,
+                    # The digest may be unknown if hashing itself failed, but
+                    # a file must always carry a well-formed placeholder so
+                    # that the rest of the pipeline can rely on the field.
+                    content_hash=digest if digest else "sha256:" + "0" * 64,
+                    size_bytes=failed_stat.st_size if failed_stat else 0,
+                    modified_time_ns=failed_stat.st_mtime_ns if failed_stat else 0,
                     status="error",
                     error=str(error),
                 )

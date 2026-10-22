@@ -99,21 +99,28 @@ def apply_plan(plan: Plan, storage_dir: Path, operation_ids: set[str], approved:
     invalid_ids = operation_ids - ready_ids
     if invalid_ids:
         raise OperationError(f"Unknown or non-ready operation(s): {', '.join(sorted(invalid_ids))}")
+    selected = [operation for operation in plan.operations if operation.operation_id in operation_ids]
     results = []
 
-    for operation in plan.operations:
-        if operation.operation_id not in operation_ids:
+    # Every source is verified before anything is moved. Without this check a
+    # failure on a later file leaves the earlier files already moved, and the
+    # caller never sees a result for them.
+    for operation in selected:
+        if operation.status != "ready":
             continue
+        source = ensure_within(root, root / operation.source_relative, "source")
+        if not source.is_file() or source.is_symlink():
+            raise OperationError(f"Source is unavailable or unsafe: {operation.source_relative}")
+        if content_hash(source) != operation.content_hash:
+            raise OperationError(f"Source changed after preview: {operation.source_relative}")
+
+    for operation in selected:
         if operation.status != "ready":
             results.append({"operation_id": operation.operation_id, "status": operation.status})
             continue
 
         source = ensure_within(root, root / operation.source_relative, "source")
         destination = safe_destination(root, operation.destination_relative)
-        if not source.is_file() or source.is_symlink():
-            raise OperationError(f"Source is unavailable or unsafe: {operation.source_relative}")
-        if content_hash(source) != operation.content_hash:
-            raise OperationError(f"Source changed after preview: {operation.source_relative}")
         if destination.exists() or destination.is_symlink():
             results.append({"operation_id": operation.operation_id, "status": "conflict"})
             continue

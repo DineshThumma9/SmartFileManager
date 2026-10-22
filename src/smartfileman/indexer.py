@@ -15,9 +15,14 @@ from .models import ContentUnitRecord, EmbeddingRecord, FileRecord
 from .readers import MEDIA_EXTENSIONS, normalize_media_filename
 from .schemas import ContentUnit, ScanResult, ScannedFile
 
-EMBEDDING_CACHE_VERSION = "cache-v4-content-first-no-source-path"
+EMBEDDING_CACHE_VERSION = "cache-v5-content-first-identity"
 EMBEDDING_BATCH_SIZE = 16
 EMBEDDING_QUERY_BATCH_SIZE = 500
+# Number of leading characters of a document that carry its identity. A
+# document's opening states what it is; the rest of the body states only what
+# it is about, and averaging a long body into the file vector blurs the
+# difference between a resume and a project document that share a toolset.
+IDENTITY_CHARS = 320
 ProgressCallback = Callable[[str, float], None]
 
 
@@ -48,6 +53,27 @@ def _embedding_payload(file: ScannedFile, unit: ContentUnit) -> str:
     else:
         context = ""
     return f"{EMBEDDING_CACHE_VERSION}\n{context}{unit.text}"
+
+
+def _identity_payload(file: ScannedFile) -> str | None:
+    """Build a payload that carries only a document's opening evidence.
+
+    This is embedded separately from the body so the planner can weigh what a
+    document *is* against what it is *about*.
+    """
+
+    opening = " ".join(
+        " ".join(unit.text.split())
+        for unit in file.units
+        if unit.text
+    )[:IDENTITY_CHARS]
+    if not opening.strip():
+        return None
+    if file.extension in MEDIA_EXTENSIONS:
+        context = f"Media title: {normalize_media_filename(Path(file.filename))}\n"
+    else:
+        context = f"Filename: {file.filename}\n"
+    return f"{EMBEDDING_CACHE_VERSION}\nidentity\n{context}{opening}"
 
 
 def _embedding_input_hash(payload: str) -> str:
@@ -127,20 +153,34 @@ def index_scan(
     embedded = 0
     reused = 0
     units_seen = 0
+    identity_embedded = 0
+    identity_reused = 0
 
     with open_session(engine) as session:
         model_digest = _model_digest(provider, reset_unknown=True)
         work_items: list[tuple[ScannedFile, ContentUnit, str, str, str]] = []
+        identity_items: list[tuple[ScannedFile, str, str, str]] = []
         total_files = max(1, len(scan_result.ready_files))
         if progress_callback:
             progress_callback("Indexing content and embeddings", 0.0)
         for file_index, file in enumerate(scan_result.ready_files, start=1):
+            anchor_unit_id = ""
             for unit in file.units:
                 units_seen += 1
                 unit_id = _unit_id(file.file_id, unit)
+                anchor_unit_id = anchor_unit_id or unit_id
                 payload = _embedding_payload(file, unit)
                 input_hash = _embedding_input_hash(payload)
                 work_items.append((file, unit, unit_id, payload, input_hash))
+            identity_payload = _identity_payload(file)
+            if identity_payload and anchor_unit_id:
+                # The identity vector is anchored to the file's first unit so
+                # it reuses the existing content-unit row instead of adding a
+                # parallel table. Its payload differs, so its input hash
+                # differs, and the two never share a cache entry.
+                identity_items.append(
+                    (file, anchor_unit_id, identity_payload, _embedding_input_hash(identity_payload))
+                )
             if progress_callback:
                 progress_callback("Indexing content and embeddings", 0.45 * file_index / total_files)
 
@@ -198,6 +238,7 @@ def index_scan(
                     setattr(current, field, value)
 
         input_hashes = {input_hash for _, _, _, _, input_hash in work_items}
+        input_hashes.update(input_hash for _, _, _, input_hash in identity_items)
         exact_cache, input_cache = _load_cached_embeddings(session, input_hashes, provider, model_digest)
         pending: list[tuple[ContentUnit, str, str, str]] = []
         for _, unit, unit_id, payload, input_hash in work_items:
@@ -209,6 +250,17 @@ def index_scan(
                 reused += 1
                 continue
             pending.append((unit, unit_id, payload, input_hash))
+
+        pending_identity: list[tuple[str, str, str]] = []
+        for _, unit_id, payload, input_hash in identity_items:
+            existing = exact_cache.get((unit_id, input_hash)) or input_cache.get(input_hash)
+            if existing:
+                vector = _vector_from_blob(existing.vector_blob, existing.dimension)
+                if existing.unit_id != unit_id:
+                    _store_embedding(session, unit_id, input_hash, vector, provider, model_digest)
+                identity_reused += 1
+                continue
+            pending_identity.append((unit_id, payload, input_hash))
 
         if progress_callback:
             progress_callback("Indexing content and embeddings", 0.5)
@@ -226,11 +278,27 @@ def index_scan(
                     0.5 + 0.5 * min(1.0, (start + len(batch)) / max(1, len(pending))),
                 )
 
+        for start in range(0, len(pending_identity), EMBEDDING_BATCH_SIZE):
+            batch = pending_identity[start : start + EMBEDDING_BATCH_SIZE]
+            vectors = provider.embed([payload for _, payload, _ in batch])
+            if len(vectors) != len(batch):
+                raise RuntimeError("Embedding provider returned an incomplete batch.")
+            for (unit_id, _, input_hash), vector in zip(batch, vectors, strict=True):
+                _store_embedding(session, unit_id, input_hash, vector, provider, model_digest)
+                identity_embedded += 1
+
         session.commit()
         if progress_callback:
             progress_callback("Indexing content and embeddings", 1.0)
 
-    return {"files": len(scan_result.ready_files), "units": units_seen, "embedded": embedded, "reused": reused}
+    return {
+        "files": len(scan_result.ready_files),
+        "units": units_seen,
+        "embedded": embedded,
+        "reused": reused,
+        "identity_embedded": identity_embedded,
+        "identity_reused": identity_reused,
+    }
 
 
 def _normalize(vector: list[float]) -> list[float]:
@@ -295,4 +363,56 @@ def load_cached_file_vectors(
                 vectors_by_file[file_id] = _normalize(mean)
         if progress_callback:
             progress_callback("Loading cached file vectors", 1.0)
+    return vectors_by_file
+
+
+def load_cached_identity_vectors(
+    scan_result: ScanResult,
+    database_path: Path,
+    provider: EmbeddingProvider,
+) -> dict[str, list[float]]:
+    """Load the cached opening-evidence vector for each scanned file.
+
+    The identity vector is stored against the file's first content unit, so it
+    shares the existing embedding table and its existing cache lifetime.
+    """
+
+    engine = create_database(database_path)
+    vectors_by_file: dict[str, list[float]] = {}
+    refs: list[tuple[str, str, str]] = []
+    for file in scan_result.ready_files:
+        if not file.units:
+            continue
+        anchor = _unit_id(file.file_id, file.units[0])
+        payload = _identity_payload(file)
+        if not payload:
+            continue
+        refs.append((file.file_id, anchor, _embedding_input_hash(payload)))
+    if not refs:
+        return vectors_by_file
+
+    with open_session(engine) as session:
+        model_digest = _model_digest(provider)
+        records_by_key: dict[tuple[str, str], EmbeddingRecord] = {}
+        unit_ids = sorted({unit_id for _, unit_id, _ in refs})
+        for start in range(0, len(unit_ids), EMBEDDING_QUERY_BATCH_SIZE):
+            batch = unit_ids[start : start + EMBEDDING_QUERY_BATCH_SIZE]
+            conditions = [
+                EmbeddingRecord.provider == provider.provider_name,
+                EmbeddingRecord.model_name == provider.model_name,
+                EmbeddingRecord.unit_id.in_(batch),
+            ]
+            conditions.append(EmbeddingRecord.model_digest == model_digest)
+            records = session.exec(select(EmbeddingRecord).where(*conditions)).all()
+            for record in records:
+                existing = records_by_key.get((record.unit_id, record.input_hash))
+                if existing is None or record.created_at >= existing.created_at:
+                    records_by_key[(record.unit_id, record.input_hash)] = record
+
+        for file_id, unit_id, payload_hash in refs:
+            record = records_by_key.get((unit_id, payload_hash))
+            if record:
+                vectors_by_file[file_id] = _normalize(
+                    _vector_from_blob(record.vector_blob, record.dimension)
+                )
     return vectors_by_file
